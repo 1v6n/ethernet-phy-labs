@@ -1,0 +1,15 @@
+# Verilator build outputs
+obj_dir/
+*.o
+*.d
+*.a
+
+# Waveforms & PCAPs
+*.vcd
+*.pcap
+*.fst
+
+# Executables & Logs
+emulator
+emulator_raw
+*.log
