@@ -1,4 +1,4 @@
-# Ethernet PHY & MAC Emulation Labs (IEEE 802.3)
+# Ethernet PHY:MAC/PCS/PMA Emulation Labs (IEEE 802.3)
 
 A Hardware-in-the-Loop (HIL) emulation suite for IEEE 802.3 Ethernet sublayers using SystemVerilog, Verilator, and Linux TAP interfaces. This repository bridges the gap between RTL simulation and real Linux network stacks, enabling real-time packet processing (e.g., ICMP/ping, ARP) through hardware pipelines.
 
