@@ -1,4 +1,4 @@
-# 🌐 High-Speed Ethernet PHY & MAC Sublayer Labs
+# 🌐 High-Speed Ethernet PHYs: MAC/PCS/PMA Sublayer Labs
 
 This repository contains a hands-on, hardware-oriented laboratory series designed to explore and implement high-speed **Ethernet Physical Layer (PHY)** and **Data Link Layer** sublayers in **SystemVerilog** and **C++ (Verilator)**. 
 
