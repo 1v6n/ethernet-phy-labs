@@ -1,20 +1,80 @@
 // ============================================================================
-// Module: wrapper.cpp
-// Description: Verilator C++ testbench acting as a Layer-2 MAC.
-//              Generates IEEE 802.3 Preamble, SFD, Frames, calculates CRC-32 (FCS),
-//              and prints side-by-side Unscrambled vs Scrambled PCS blocks.
+// Module: wrapper.cpp (Full-Duplex TAP Bridge for Dual-Channel 64b/66b PCS)
+// Description: Bridges tap0 (Host) and tap1 (ns_b) using dedicated A and B
+//              RTL interface ports.
 // ============================================================================
 
 #include <iostream>
 #include <iomanip>
 #include <vector>
 #include <cstdint>
+#include <cstring>
 #include <memory>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sched.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <net/if.h>
+#include <linux/if_tun.h>
 #include <verilated.h>
 #include <verilated_vcd_c.h>
 #include "Vtop.h"
 
-// Standard IEEE 802.3 CRC-32 (FCS) Calculation
+int tap_alloc(const char *dev) {
+    struct ifreq ifr;
+    int fd, err;
+
+    if ((fd = open("/dev/net/tun", O_RDWR | O_NONBLOCK)) < 0) {
+        perror("Opening /dev/net/tun failed");
+        return fd;
+    }
+
+    memset(&ifr, 0, sizeof(ifr));
+    ifr.ifr_flags = IFF_TAP | IFF_NO_PI;
+    strncpy(ifr.ifr_name, dev, IFNAMSIZ);
+
+    if ((err = ioctl(fd, TUNSETIFF, (void *) &ifr)) < 0) {
+        perror("ioctl(TUNSETIFF) failed");
+        close(fd);
+        return err;
+    }
+    return fd;
+}
+
+int tap_alloc_ns(const char* dev, const char* netns = nullptr) {
+    int orig_netns = -1;
+
+    if (netns) {
+        orig_netns = open("/proc/self/ns/net", O_RDONLY);
+        std::string ns_path = std::string("/var/run/netns/") + netns;
+        int ns_fd = open(ns_path.c_str(), O_RDONLY);
+
+        if (ns_fd < 0) {
+            perror(("Failed to open netns path: " + ns_path).c_str());
+            if (orig_netns >= 0) close(orig_netns);
+            return -1;
+        }
+
+        if (setns(ns_fd, CLONE_NEWNET) < 0) {
+            perror("setns failed");
+            close(ns_fd);
+            if (orig_netns >= 0) close(orig_netns);
+            return -1;
+        }
+        close(ns_fd);
+    }
+
+    int fd = tap_alloc(dev);
+
+    if (orig_netns >= 0) {
+        setns(orig_netns, CLONE_NEWNET);
+        close(orig_netns);
+    }
+
+    return fd;
+}
+
 uint32_t calculate_crc32(const std::vector<uint8_t>& data) {
     uint32_t crc = 0xFFFFFFFF;
     for (uint8_t byte : data) {
@@ -26,19 +86,78 @@ uint32_t calculate_crc32(const std::vector<uint8_t>& data) {
     return ~crc;
 }
 
-// Helper to extract 2-bit Sync Header (bits [1:0]) from VlWide<3> (66-bit block)
-template <typename T>
-uint8_t extract_sync_header(const T& block) {
-    return static_cast<uint8_t>(block[0] & 0x3);
-}
+template <typename TxDataT, typename TxCtrlT, typename RxDataT, typename RxCtrlT, typename TickFunc>
+ssize_t process_tap_frame(
+    int src_fd, int dst_fd,
+    TxDataT& tx_data_pin, TxCtrlT& tx_ctrl_pin,
+    const RxDataT& rx_data_pin, const RxCtrlT& rx_ctrl_pin,
+    TickFunc& tick, const char* dir_label
+) {
+    uint8_t buffer[1518];
+    ssize_t nread = read(src_fd, buffer, sizeof(buffer));
+    if (nread <= 0) return nread;
 
-// Helper to extract 64-bit Payload (bits [65:2]) from VlWide<3> (66-bit block)
-template <typename T>
-uint64_t extract_payload(const T& block) {
-    uint64_t w0 = static_cast<uint64_t>(block[0]) >> 2;               // Payload [29:0]
-    uint64_t w1 = static_cast<uint64_t>(block[1]) << 30;              // Payload [61:30]
-    uint64_t w2 = static_cast<uint64_t>(block[2] & 0x3) << 62;        // Payload [63:62]
-    return w0 | w1 | w2;
+    std::vector<uint8_t> frame(buffer, buffer + nread);
+
+    // Append CRC-32 (FCS)
+    uint32_t fcs = calculate_crc32(frame);
+    frame.push_back((fcs >> 0)  & 0xFF);
+    frame.push_back((fcs >> 8)  & 0xFF);
+    frame.push_back((fcs >> 16) & 0xFF);
+    frame.push_back((fcs >> 24) & 0xFF);
+
+    // Assemble MAC Stream: Preamble (7B) + SFD (1B) + Frame + FCS
+    std::vector<uint8_t> mac_stream = {0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0xD5};
+    mac_stream.insert(mac_stream.end(), frame.begin(), frame.end());
+
+    // Pad stream to an exact multiple of 8 bytes to maintain pure DATA blocks
+    while (mac_stream.size() % 8 != 0) {
+        mac_stream.push_back(0x00);
+    }
+
+    std::cout << "[" << dir_label << "] Streaming " << nread << " bytes through RTL PCS Datapath...\n";
+
+    std::vector<uint8_t> reconstructed_bytes;
+    size_t byte_idx = 0;
+    size_t total_stream_bytes = mac_stream.size();
+    size_t max_cycles = (total_stream_bytes / 8) + 2; // +2 cycles for pipeline flush
+
+    for (size_t cycle = 0; cycle < max_cycles; ++cycle) {
+        uint64_t txd = 0;
+        uint8_t  txc = 0x00;
+
+        if (byte_idx < total_stream_bytes) {
+            for (int lane = 0; lane < 8; ++lane) {
+                txd |= (static_cast<uint64_t>(mac_stream[byte_idx++]) << (lane * 8));
+            }
+            txc = 0x00; // Pure Data Block
+        } else {
+            txd = 0x0707070707070707ULL; // Idle Block /I/
+            txc = 0xFF;                 // Control
+        }
+
+        tx_data_pin = txd;
+        tx_ctrl_pin = txc;
+        tick();
+
+        // Sample descrambled output bytes from receiving interface
+        for (int lane = 0; lane < 8; ++lane) {
+            uint8_t rxd_byte = (rx_data_pin >> (lane * 8)) & 0xFF;
+            uint8_t rxc_bit  = (rx_ctrl_pin >> lane) & 0x1;
+
+            if (rxc_bit == 0 && reconstructed_bytes.size() < total_stream_bytes) {
+                reconstructed_bytes.push_back(rxd_byte);
+            }
+        }
+    }
+
+    // Deliver exact frame (stripping 8B preamble/SFD & trailing FCS/padding)
+    if (reconstructed_bytes.size() >= (8 + nread)) {
+        ssize_t nw = write(dst_fd, reconstructed_bytes.data() + 8, nread);
+        (void)nw;
+    }
+
+    return nread;
 }
 
 int main(int argc, char** argv) {
@@ -57,81 +176,50 @@ int main(int argc, char** argv) {
         top->clk = 1; top->eval(); tfp->dump(main_time++);
     };
 
+    int tap0_fd = tap_alloc_ns("tap0", nullptr);
+    int tap1_fd = tap_alloc_ns("tap1", "ns_b");
+
+    if (tap0_fd < 0 || tap1_fd < 0) {
+        std::cerr << "❌ Error: Run setup script with sudo before executing emulator.\n";
+        return 1;
+    }
+
     // Reset Sequence
     top->rst_n = 0;
-    top->xgmii_txd = 0x0707070707070707ULL; // Idle Characters (/I/)
-    top->xgmii_txc = 0xFF;                  // All Control
+    top->a_txd = 0x0707070707070707ULL;
+    top->a_txc = 0xFF;
+    top->b_txd = 0x0707070707070707ULL;
+    top->b_txc = 0xFF;
     for (int i = 0; i < 10; ++i) tick();
     top->rst_n = 1;
 
+    // FSM Warm-up cycles to establish lock on both channels
+    for (int i = 0; i < 70; ++i) tick();
+
     std::cout << "====================================================================================\n";
-    std::cout << " 🚀 PCS 64b/66b Encoder: Unscrambled vs. Scrambled Side-by-Side Comparison\n";
+    std::cout << " 🚀 Dual-Channel Hardware-in-the-Loop Active: [tap0] <---> [top.sv] <---> [tap1]\n";
+    std::cout << " 📡 Execute: ping -c 2 -I tap0 10.0.0.2\n";
     std::cout << "====================================================================================\n";
 
-    // Build raw Ethernet Frame payload
-    std::vector<uint8_t> frame_payload = {
-        0x00, 0x0A, 0x35, 0x00, 0x01, 0x02, // Dest MAC
-        0x00, 0x0A, 0x35, 0x00, 0x01, 0x03, // Src MAC
-        0x08, 0x00,                         // EtherType (IPv4)
-        0x45, 0x00, 0x00, 0x1C, 0x00, 0x01, 0x00, 0x00, 0x40, 0x01, 0x7C, 0xCE,
-        0x0A, 0x00, 0x00, 0x01, 0x0A, 0x00, 0x00, 0x02 // IP Payload
-    };
+    while (!Verilated::gotFinish()) {
+        // Host -> ns_b: Drives A inputs (a_txd, a_txc) and reads B outputs (b_rxd, b_rxc)
+        ssize_t h2n = process_tap_frame(tap0_fd, tap1_fd, top->a_txd, top->a_txc, top->b_rxd, top->b_rxc, tick, "Host -> ns_b");
 
-    // Append CRC-32 (FCS)
-    uint32_t fcs = calculate_crc32(frame_payload);
-    frame_payload.push_back((fcs >> 0)  & 0xFF);
-    frame_payload.push_back((fcs >> 8)  & 0xFF);
-    frame_payload.push_back((fcs >> 16) & 0xFF);
-    frame_payload.push_back((fcs >> 24) & 0xFF);
+        // ns_b -> Host: Drives B inputs (b_txd, b_txc) and reads A outputs (a_rxd, a_rxc)
+        ssize_t n2h = process_tap_frame(tap1_fd, tap0_fd, top->b_txd, top->b_txc, top->a_rxd, top->a_rxc, tick, "ns_b -> Host");
 
-    // Assemble full L1 MAC Stream: Preamble (7 bytes) + SFD (1 byte) + Frame/FCS
-    std::vector<uint8_t> mac_stream = {0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0xD5};
-    mac_stream.insert(mac_stream.end(), frame_payload.begin(), frame_payload.end());
-
-    // Send Idle cycles before frame transmission
-    for (int i = 0; i < 5; ++i) tick();
-
-    // Transmit MAC Stream over 64-bit XGMII interface
-    size_t byte_idx = 0;
-    while (byte_idx < mac_stream.size()) {
-        uint64_t txd = 0;
-        uint8_t  txc = 0x00;
-
-        for (int lane = 0; lane < 8; ++lane) {
-            if (byte_idx < mac_stream.size()) {
-                txd |= (static_cast<uint64_t>(mac_stream[byte_idx]) << (lane * 8));
-                byte_idx++;
-            } else {
-                txd |= (static_cast<uint64_t>(0x07) << (lane * 8)); // Pad tail with Idle (/I/)
-                txc |= (1 << lane);                                 // Control byte flag
-            }
+        if (h2n <= 0 && n2h <= 0) {
+            top->a_txd = 0x0707070707070707ULL;
+            top->a_txc = 0xFF;
+            top->b_txd = 0x0707070707070707ULL;
+            top->b_txc = 0xFF;
+            tick();
+            usleep(1000);
         }
-
-        top->xgmii_txd = txd;
-        top->xgmii_txc = txc;
-        tick();
-
-        // Extract Sync Header and Payload from VlWide<3> signals using helper functions
-        uint8_t  sync_hdr            = extract_sync_header(top->unscrambled_tx_block);
-        uint64_t unscrambled_payload = extract_payload(top->unscrambled_tx_block);
-        uint64_t scrambled_payload   = extract_payload(top->scrambled_tx_block);
-
-        std::cout << "[Cycle " << std::setw(3) << main_time/2 << "] "
-                  << "Sync: 2'b" << (sync_hdr == 1 ? "01 (DATA)" : "10 (CTRL)")
-                  << " | Raw: 0x" << std::hex << std::setw(16) << std::setfill('0') << unscrambled_payload
-                  << " | Scrambled: 0x" << std::setw(16) << std::setfill('0') << scrambled_payload 
-                  << std::dec << "\n";
     }
 
-    // Return interface to Idle state
-    top->xgmii_txd = 0x0707070707070707ULL;
-    top->xgmii_txc = 0xFF;
-    for (int i = 0; i < 10; ++i) tick();
-
     tfp->close();
-    std::cout << "====================================================================================\n";
-    std::cout << " ✅ Simulation complete. Waveform saved to waveform.vcd\n";
-    std::cout << "====================================================================================\n";
-
+    close(tap0_fd);
+    close(tap1_fd);
     return 0;
 }

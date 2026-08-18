@@ -29,7 +29,11 @@ ip netns exec ns_b ip addr add 10.0.0.2/24 dev tap1
 ip netns exec ns_b ip link set tap1 promisc on
 ip netns exec ns_b ip link set tap1 up
 
-echo "=== 4. Verificando estado del entorno ==="
+echo "=== 4. Deshabilitando Offloading para Simulación RTL ==="
+ethtool -K tap0 tx off rx off gso off gro off tso off 2>/dev/null || true
+ip netns exec ns_b ethtool -K tap1 tx off rx off gso off gro off tso off 2>/dev/null || true
+
+echo "=== 5. Verificando estado del entorno ==="
 echo "-> Interfaz tap0 (Host):"
 ip addr show dev tap0
 echo "-> Interfaz tap1 (Namespace ns_b):"
