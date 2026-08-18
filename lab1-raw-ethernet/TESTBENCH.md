@@ -52,13 +52,12 @@ graph TD
 ## Datapath Processing Flow
 
 1. **Software Framing (`wrapper.cpp`)**
-   * Captures raw Layer-2 Ethernet frames from `tap0` or `tap1`.
-   * Calculates and appends Ethernet CRC-32 Frame Check Sequence (FCS).
-   * Formats the packet into an 8-bit byte stream preceded by standard 7-byte Preamble (`0x55`) and 1-byte SFD (`0xD5`).
+   * Reads raw Layer-2 Ethernet frames directly from `tap0` or `tap1`.
+   * Passes frame payload bytes straight to the RTL bus without appending Preamble, SFD, or CRC-32 FCS.
 
 2. **8-Bit Stream Management**
-   * Asserts `eth_tx_en` high during active frame header and payload transmission.
-   * Streams frame bytes sequentially on `eth_txd[7:0]` at one byte per clock cycle.
+   * Asserts `eth_tx_en` high during active frame transmission.
+   * Streams raw frame bytes sequentially on `eth_txd[7:0]` at one byte per clock cycle.
 
 3. **RTL Datapath (`top.sv`)**
    * Buffers, validates, and forwards raw byte streams across the hardware pipeline.
@@ -66,7 +65,7 @@ graph TD
 
 4. **Frame Reconstruction & Delivery**
    * Monitors `eth_rx_dv` and captures valid output bytes from `eth_rxd[7:0]`.
-   * Reassembles full Layer-2 Ethernet frames, verifies FCS integrity, and forwards packets to the target TAP interface.
+   * Passes the reconstructed raw Layer-2 Ethernet frame directly to the target TAP interface.
 
 ---
 
