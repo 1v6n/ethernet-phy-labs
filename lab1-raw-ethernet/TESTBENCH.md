@@ -13,19 +13,25 @@ graph TD
         W[wrapper.cpp<br/>TAP I/O & Byte Stream Handler]
         
         subgraph RTL top.sv
-            ETH[Raw Ethernet Datapath<br/>8-bit Byte Pipeline / Pass-Through FIFO]
+            ETH[Raw Ethernet Datapath<br/>8-bit Byte Pipeline]
         end
         
         VCD[(waveform.vcd<br/>GTKWave Traces)]
     end
 
-    A -->|Raw L2 Frame| W
+    %% Request Path (Host -> ns_b)
+    A -->|1. Ping Request| W
     W -->|eth_txd / eth_tx_en| ETH
     ETH -->|eth_rxd / eth_rx_dv| W
-    W -->|Raw L2 Frame| B
+    W -->|2. Forward Request| B
 
-    B -->|Reply Frame| W
-    W -.->|Dump Signals| VCD
+    %% Reply Path (ns_b -> Host)
+    B -->|3. Ping Reply| W
+    W -->|eth_txd / eth_tx_en| ETH
+    ETH -->|eth_rxd / eth_rx_dv| W
+    W -->|4. Forward Reply| A
+
+    W -.->|Dump Traces| VCD
 ```
 
 ---
