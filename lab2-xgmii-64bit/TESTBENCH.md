@@ -10,22 +10,28 @@ graph TD
     end
 
     subgraph Verilator Simulation Engine
-        W[wrapper.cpp<br/>TAP I/O & XGMII Packet Handler]
+        W[wrapper.cpp<br/>TAP I/O & XGMII Handler]
         
         subgraph RTL top.sv
-            XGMII[XGMII 64-bit Datapath<br/>Lane Alignment / Pipeline Registers / FIFO]
+            XGMII[XGMII 64-bit Datapath<br/>Lane Alignment & Pipeline]
         end
         
         VCD[(waveform.vcd<br/>GTKWave Traces)]
     end
 
-    A -->|Raw L2 Frame| W
+    %% Request Path (Host -> ns_b)
+    A -->|1. Ping Request| W
     W -->|xgmii_txd / xgmii_txc| XGMII
     XGMII -->|xgmii_rxd / xgmii_rxc| W
-    W -->|Raw L2 Frame| B
+    W -->|2. Forward Request| B
 
-    B -->|Reply Frame| W
-    W -.->|Dump Signals| VCD
+    %% Reply Path (ns_b -> Host)
+    B -->|3. Ping Reply| W
+    W -->|xgmii_txd / xgmii_txc| XGMII
+    XGMII -->|xgmii_rxd / xgmii_rxc| W
+    W -->|4. Forward Reply| A
+
+    W -.->|Dump Traces| VCD
 ```
 
 ---
@@ -46,21 +52,20 @@ graph TD
 ## Datapath Processing Flow
 
 1. **Software Framing (`wrapper.cpp`)**
-   * Captures raw Layer-2 Ethernet frames from the host Linux TAP interface (`tap0`).
-   * Appends Ethernet CRC-32 Frame Check Sequence (FCS).
-   * Formats payload into standard 64-bit XGMII words with Start control characters (`/S/` = `0xFB`), Preamble (`0x55`), SFD (`0xD5`), and Terminate control characters (`/T/` = `0xFD`).
+   * Captures raw Layer-2 Ethernet frames from `tap0` or `tap1`.
+   * Formats payload into standard 64-bit XGMII words, inserting Start control characters (`/S/` = `0xFB`), Preamble (`0x55`), SFD (`0xD5`), Terminate control characters (`/T/` = `0xFD`), and Idle control characters (`/I/` = `0x07`).
 
-2. **XGMII Control Lane Mapping**
+2. **Control Lane Mapping**
    * **Data Lanes (`txc = 0`):** Normal frame payload bytes are transmitted across 8 parallel 8-bit lanes.
-   * **Control Lanes (`txc = 1`):** Idle characters (`0x07`), Start (`0xFB`), or Terminate (`0xFD`) control characters are flagged.
+   * **Control Lanes (`txc = 1`):** Flag control characters such as Start, Terminate, or Idle across individual lanes.
 
 3. **RTL Processing (`top.sv`)**
    * Buffers, validates lane alignment, and pipes 64-bit XGMII words through the register stages.
-   * Maintains inter-packet gap (IPG) alignment requirements across 8-byte boundaries.
+   * Preserves alignment requirements across 8-byte boundaries.
 
-4. **Frame Reconstruction & Injection**
-   * Sampled output signals (`xgmii_rxd`, `xgmii_rxc`) are processed by `wrapper.cpp`.
-   * Strips XGMII control characters, verifies FCS, and forwards valid packets to the destination TAP interface (`tap1`).
+4. **Frame Reconstruction & Delivery**
+   * Monitors `xgmii_rxd` and `xgmii_rxc` outputs.
+   * Strips XGMII control characters, reassembles the frame payload, and forwards packets to the destination TAP interface.
 
 ---
 
@@ -73,8 +78,8 @@ gtkwave waveform.vcd
 
 Add these top-level signals to analyze 64-bit XGMII datapath transfers:
 
-* **`TOP.top.clk`**: Master clock signal driving 64-bit transfers.
-* **`TOP.top.rst_n`**: Reset state.
+* **`TOP.top.clk`**: Master clock driving 64-bit transfers.
+* **`TOP.top.rst_n`**: Active-low reset state.
 * **`TOP.top.xgmii_txd[63:0]`**: 64-bit Transmit Data bus (Lanes 0–7).
 * **`TOP.top.xgmii_txc[7:0]`**: Transmit Control flags (`8'h00` for pure payload, `8'h01` for lane 0 Start/Control).
 * **`TOP.top.xgmii_rxd[63:0]`**: 64-bit Receive Data bus output.
