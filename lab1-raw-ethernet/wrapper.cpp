@@ -113,32 +113,11 @@ int main(int argc, char **argv) {
             for (ssize_t i = 0; i < n_b; i++) tx_queue_b.push(buf[i]);
         }
 
-        // 2. Inyectar bytes al RTL (Nodo A)
-        if (!tx_queue_a.empty()) {
-            top->a_data_in = tx_queue_a.front();
-            top->a_valid_in = 1;
-            tx_queue_a.pop();
-        } else {
-            top->a_data_in = 0;
-            top->a_valid_in = 0;
-        }
-
-        // Inyectar bytes al RTL (Nodo B)
-        if (!tx_queue_b.empty()) {
-            top->b_data_in = tx_queue_b.front();
-            top->b_valid_in = 1;
-            tx_queue_b.pop();
-        } else {
-            top->b_data_in = 0;
-            top->b_valid_in = 0;
-        }
-
-        // 3. Evaluar flanco de subida
+        // 1. Flanco de subida (clk = 1): El RTL captura las entradas del ciclo anterior
         top->clk = 1;
         top->eval();
-        tfp->dump(main_time++);
 
-        // 4. Recoger datos procesados por el RTL
+        // 2. Recoger datos procesados por el RTL en este flanco
         if (top->b_valid_out) {
             rx_buf_b.push_back(top->b_data_out);
         } else if (!rx_buf_b.empty()) {
@@ -153,7 +132,29 @@ int main(int argc, char **argv) {
             rx_buf_a.clear();
         }
 
-        // 5. Evaluar flanco de bajada
+        // 3. Emulación de Asignación No Bloqueante (NBA):
+        // Actualizar entradas en el flanco de subida después de que el RTL haya muestreado
+        if (!tx_queue_a.empty()) {
+            top->a_data_in = tx_queue_a.front();
+            top->a_valid_in = 1;
+            tx_queue_a.pop();
+        } else {
+            top->a_data_in = 0;
+            top->a_valid_in = 0;
+        }
+
+        if (!tx_queue_b.empty()) {
+            top->b_data_in = tx_queue_b.front();
+            top->b_valid_in = 1;
+            tx_queue_b.pop();
+        } else {
+            top->b_data_in = 0;
+            top->b_valid_in = 0;
+        }
+
+        tfp->dump(main_time++);
+
+        // 4. Flanco de bajada (clk = 0)
         top->clk = 0;
         top->eval();
         tfp->dump(main_time++);
