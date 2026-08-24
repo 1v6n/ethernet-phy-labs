@@ -32,6 +32,20 @@
 % Metropolis tuning
 \metroset{progressbar=frametitle, block=fill}
 
+% Custom image frame styling for screenshots
+\newtcbox{\imageframe}{
+    colback=NavyDark,
+    colframe=NavyDark!40!gray,
+    arc=0mm,
+    boxrule=0.6pt,
+    left=1pt,
+    right=1pt,
+    top=1pt,
+    bottom=1pt,
+    boxsep=0pt,
+    nobeforeafter
+}
+
 % --- Title Information ---
 \title{Lab 2: 64-Bit XGMII Interface \& Reconciliation Sublayer}
 \subtitle{Hardware-in-the-Loop Simulation, FCS CRC-32 \& 64-Bit Waveform Analysis}
@@ -113,7 +127,7 @@
     
     \begin{column}{0.50\textwidth}
         \centering
-        \includegraphics[width=\textwidth, height=0.68\textheight, keepaspectratio]{figures/screenshot1_terminal.png}
+        \imageframe{\includegraphics[width=0.96\linewidth, height=0.64\textheight, keepaspectratio]{figures/screenshot1_terminal.png}}
         \vspace{1mm}
         \captionof{figure}{Terminal execution: TAP interface binding, Verilator build, and no loss in ICMP traffic.}
     \end{column}
@@ -134,7 +148,7 @@
     
     \vspace{1mm}
     \begin{center}
-        \includegraphics[width=0.98\textwidth, height=0.48\textheight, keepaspectratio]{figures/screenshot2_wireshark.png}
+        \imageframe{\includegraphics[width=0.94\textwidth, height=0.45\textheight, keepaspectratio]{figures/screenshot2_wireshark.png}}
         \vspace{1mm}
         \captionof{figure}{Wireshark dissection and hex dump of the 98-byte captured ICMP frame.}
     \end{center}
@@ -153,7 +167,7 @@
     
     \vspace{1mm}
     \begin{center}
-        \includegraphics[width=0.98\textwidth, height=0.48\textheight, keepaspectratio]{figures/screenshot3_preamble_start.png}
+        \imageframe{\includegraphics[width=0.94\textwidth, height=0.45\textheight, keepaspectratio]{figures/screenshot3_preamble_start.png}}
         \vspace{1mm}
         \captionof{figure}{Transition from Idles (\texttt{/I/ = 0x07}) to Start of Frame (\texttt{/S/ = 0xFB}) on Lane 0.}
     \end{center}
@@ -173,7 +187,7 @@
     
     \vspace{1mm}
     \begin{center}
-        \includegraphics[width=0.98\textwidth, height=0.48\textheight, keepaspectratio]{figures/screenshot4_headers_correlation.png}
+        \imageframe{\includegraphics[width=0.94\textwidth, height=0.45\textheight, keepaspectratio]{figures/screenshot4_headers_correlation.png}}
         \vspace{1mm}
         \captionof{figure}{Cycle-by-cycle alignment between Wireshark L2/L3 hex and 64-bit lane distribution on \texttt{a\_txd[63:0]}.}
     \end{center}
@@ -193,7 +207,7 @@
     
     \vspace{1mm}
     \begin{center}
-        \includegraphics[width=0.98\textwidth, height=0.48\textheight, keepaspectratio]{figures/screenshot5_payload_correlation.png}
+        \imageframe{\includegraphics[width=0.94\textwidth, height=0.45\textheight, keepaspectratio]{figures/screenshot5_payload_correlation.png}}
         \vspace{1mm}
         \captionof{figure}{Multi-lane distribution of ICMP headers, timestamp, and \texttt{0xCAFE0002} payload across 64-bit XGMII cycles.}
     \end{center}
@@ -212,7 +226,7 @@
     
     \vspace{1mm}
     \begin{center}
-        \includegraphics[width=0.98\textwidth, height=0.48\textheight, keepaspectratio]{figures/screenshot6_termination_fcs.png}
+        \imageframe{\includegraphics[width=0.94\textwidth, height=0.45\textheight, keepaspectratio]{figures/screenshot6_termination_fcs.png}}
         \vspace{1mm}
         \captionof{figure}{Cycle 13 frame termination: FCS CRC-32 (\texttt{0x022EE9EC}), and Terminate delimiter (\texttt{/T/ = 0xFD}).}
     \end{center}
@@ -232,7 +246,7 @@
     
     \vspace{1mm}
     \begin{center}
-        \includegraphics[width=0.98\textwidth, height=0.48\textheight, keepaspectratio]{figures/screenshot7_latency.png}
+        \imageframe{\includegraphics[width=0.94\textwidth, height=0.45\textheight, keepaspectratio]{figures/screenshot7_latency.png}}
         \vspace{1mm}
         \captionof{figure}{GTKWave trace: true 1-clock-cycle register latency ($1\ T_{\text{clk}}$) through RTL non-blocking assignments.}
     \end{center}
