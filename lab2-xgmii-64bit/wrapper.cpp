@@ -234,6 +234,16 @@ int main(int argc, char **argv) {
             while(!q.empty()) { tx_q_b.push(q.front()); q.pop(); }
         }
 
+        // 1. Flanco de subida (clk = 1): El RTL captura las entradas del ciclo anterior
+        top->clk = 1;
+        top->eval();
+
+        // 2. Procesar recepción en los extremos
+        rx_b.process(top->b_rxd, top->b_rxc, tap1_fd);
+        rx_a.process(top->a_rxd, top->a_rxc, tap0_fd);
+
+        // 3. Emulación de Asignación No Bloqueante (NBA):
+        // Actualizar entradas en el flanco de subida después de que el RTL haya muestreado
         if (!tx_q_a.empty()) {
             top->a_txd = tx_q_a.front().data;
             top->a_txc = tx_q_a.front().ctrl;
@@ -252,16 +262,9 @@ int main(int argc, char **argv) {
             top->b_txc = 0xFF;
         }
 
-        // Clock High
-        top->clk = 1;
-        top->eval();
         tfp->dump(main_time++);
 
-        // Process RX
-        rx_b.process(top->b_rxd, top->b_rxc, tap1_fd);
-        rx_a.process(top->a_rxd, top->a_rxc, tap0_fd);
-
-        // Clock Low
+        // 4. Flanco de bajada (clk = 0)
         top->clk = 0;
         top->eval();
         tfp->dump(main_time++);
