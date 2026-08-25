@@ -142,7 +142,7 @@
     \textbf{Captured ICMP Echo Request Frame (98 Bytes Total):}
     \begin{itemize}\scriptsize
         \item \textbf{Layer 2 Header (14B)}: Dst MAC \texttt{02:00:00:00:00:02}, Src MAC \texttt{02:00:00:00:00:01}, EtherType \texttt{0x0800} (IPv4).
-        \item \textbf{Layer 3/4 Header (28B)}: IPv4 \texttt{10.0.0.1} $\rightarrow$ \texttt{10.0.0.2} (20B, Len 84B, ID \texttt{0x7E53}), ICMP Type 8 (Echo Request, Code 0, Checksum \texttt{0xECEC}, ID \texttt{0x4702}, Seq 1).
+        \item \textbf{Layer 3 Header (28B)}: IPv4 \texttt{10.0.0.1} $\rightarrow$ \texttt{10.0.0.2} (20B, Len 84B, ID \texttt{0x7E53}), ICMP Type 8 (Echo Request, Code 0, Checksum \texttt{0xECEC}, ID \texttt{0x4702}, Seq 1).
         \item \textbf{Payload (56B)}: 16-byte kernel timestamp + 40-byte repeating pattern \texttt{ca fe 00 02} (offsets \texttt{0x003a}--\texttt{0x0061}).
     \end{itemize}
     
