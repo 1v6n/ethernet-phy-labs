@@ -126,7 +126,7 @@
     \textbf{Captured ICMP Echo Request Frame (98 Bytes Total):}
     \begin{itemize}\scriptsize
         \item \textbf{Layer 2 Header (14B)}: Dst MAC \texttt{02:00:00:00:00:02}, Src MAC \texttt{02:00:00:00:00:01}, EtherType \texttt{0x0800} (IPv4).
-        \item \textbf{Layer 3/4 Header (28B)}: IPv4 \texttt{10.0.0.1} $\rightarrow$ \texttt{10.0.0.2} (20B), ICMP Type 8 (Echo Request, Code 0, 8B).
+        \item \textbf{Layer 3 Header (28B)}: IPv4 \texttt{10.0.0.1} $\rightarrow$ \texttt{10.0.0.2} (20B), ICMP Type 8 (Echo Request, Code 0, 8B).
         \item \textbf{Payload (56B)}: 16-byte kernel timestamp + 40-byte repeating pattern \texttt{ca fe 00 01}.
     \end{itemize}
     
@@ -179,7 +179,7 @@
 \end{frame}
 
 % ==========================================
-% SLIDE 7: SW-to-HW Correlation (Layer 4 ICMP & Payload)
+% SLIDE 7: SW-to-HW Correlation (Layer 3 ICMP & Payload)
 % ==========================================
 \begin{frame}{6. SW-to-HW Correlation: ICMP \& Payload}
     \vspace{-2mm}
