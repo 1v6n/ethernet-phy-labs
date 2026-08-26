@@ -1,29 +1,36 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# ============================================================================
+# File: setup_netns.sh
+# Description: Network Namespace and TAP Setup Script (IPv6 Disabled)
+# ============================================================================
+
 set -e
 
-# Privilege check
+# Ensure script is run with root privileges
 if [ "$EUID" -ne 0 ]; then
-  echo "[ERROR] Please run as root (e.g., sudo ./scripts/setup_netns.sh)."
+  echo "[ERROR] Please run as root (sudo ./scripts/setup_netns.sh)"
   exit 1
 fi
 
-echo "=== 1. Limpiando configuración previa ==="
-ip link del tap0 2>/dev/null || true
-ip netns del ns_b 2>/dev/null || true
+echo "[NETNS] Cleaning up previous setup..."
+ip netns delete ns_b 2>/dev/null || true
+ip link delete tap0 2>/dev/null || true
+ip link delete tap1 2>/dev/null || true
 
-echo "=== 2. Creando interfaces TAP y Namespace de red ==="
+echo "[NETNS] Creating namespace ns_b & TAP nodes..."
 mkdir -p /dev/net
 if [ ! -c /dev/net/tun ]; then
   mknod /dev/net/tun c 10 200
   chmod 666 /dev/net/tun
 fi
 mkdir -p /var/run/netns
+
 ip netns add ns_b
 ip tuntap add dev tap0 mode tap
 ip tuntap add dev tap1 mode tap
 ip link set tap1 netns ns_b
 
-echo "=== 3. Configurando Direcciones IP, MACs y Estado ==="
+echo "[NETNS] Configuring IP addresses, MACs & link states..."
 # Host interface (tap0)
 ip link set dev tap0 address 02:00:00:00:00:01 2>/dev/null || true
 ip addr add 10.0.0.1/24 dev tap0
@@ -39,25 +46,21 @@ ip netns exec ns_b ip link set tap1 multicast off
 ip netns exec ns_b ip link set tap1 promisc on
 ip netns exec ns_b ip link set tap1 up
 
-echo "=== 4. Deshabilitando Offloading e IPv6/mDNS (Traza Limpia) ==="
-# Hardware offload disable
+echo "[NETNS] Disabling hardware offloading & IPv6 (Clean Trace)..."
 ethtool -K tap0 tx off rx off gso off gro off tso off 2>/dev/null || true
 ip netns exec ns_b ethtool -K tap1 tx off rx off gso off gro off tso off 2>/dev/null || true
 
-# Disable IPv6 (eliminates ICMPv6, MLD, Neighbor Solicitations)
 sysctl -w net.ipv6.conf.tap0.disable_ipv6=1 >/dev/null 2>&1 || true
+ip netns exec ns_b sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
+ip netns exec ns_b sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
 ip netns exec ns_b sysctl -w net.ipv6.conf.tap1.disable_ipv6=1 >/dev/null 2>&1 || true
 
-# Pre-populate static ARP cache (eliminates ARP traffic)
+# Pre-populate static ARP cache
 ip neigh replace 10.0.0.2 lladdr 02:00:00:00:00:02 dev tap0 nud permanent 2>/dev/null || true
 ip netns exec ns_b ip neigh replace 10.0.0.1 lladdr 02:00:00:00:00:01 dev tap1 nud permanent 2>/dev/null || true
 
-echo "=== 5. Verificando estado del entorno ==="
-echo "-> Interfaz tap0 (Host):"
-ip addr show dev tap0
-echo "-> Interfaz tap1 (Namespace ns_b):"
-ip netns exec ns_b ip addr show dev tap1
-
-echo "================================================="
-echo "Entorno preparado con éxito. Listo para la simulación."
-echo "================================================="
+echo "--------------------------------------------------"
+echo "[NETNS] Setup Complete:"
+echo "  * Host (Host NetNS): tap0 -> 10.0.0.1/24 (MAC 02:00:00:00:00:01, IPv6 OFF)"
+echo "  * Node B (ns_b NetNS): tap1 -> 10.0.0.2/24 (MAC 02:00:00:00:00:02, IPv6 OFF)"
+echo "--------------------------------------------------"

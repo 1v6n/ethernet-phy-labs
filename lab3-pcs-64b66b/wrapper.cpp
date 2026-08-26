@@ -1,225 +1,233 @@
 // ============================================================================
-// Module: wrapper.cpp (Full-Duplex TAP Bridge for Dual-Channel 64b/66b PCS)
-// Description: Bridges tap0 (Host) and tap1 (ns_b) using dedicated A and B
-//              RTL interface ports.
+// File: wrapper.cpp
+// Description: Dual TAP Verilator Engine supporting Network Namespaces (ns_b),
+//              Runtime Scrambler CLI options, and clean SIGINT handling.
 // ============================================================================
 
 #include <iostream>
-#include <iomanip>
-#include <vector>
-#include <cstdint>
 #include <cstring>
-#include <memory>
-#include <fcntl.h>
-#include <unistd.h>
+#include <cerrno>
+#include <csignal>
+#include <string>
 #include <sched.h>
+#include <unistd.h>
+#include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <net/if.h>
 #include <linux/if_tun.h>
-#include <verilated.h>
-#include <verilated_vcd_c.h>
+
 #include "Vtop.h"
+#include "verilated.h"
 
-int tap_alloc(const char *dev) {
-    struct ifreq ifr;
-    int fd, err;
+// Signal handling flag for Ctrl+C
+volatile bool g_stop_requested = false;
 
-    if ((fd = open("/dev/net/tun", O_RDWR | O_NONBLOCK)) < 0) {
-        perror("Opening /dev/net/tun failed");
-        return fd;
-    }
-
-    memset(&ifr, 0, sizeof(ifr));
-    ifr.ifr_flags = IFF_TAP | IFF_NO_PI;
-    strncpy(ifr.ifr_name, dev, IFNAMSIZ);
-
-    if ((err = ioctl(fd, TUNSETIFF, (void *) &ifr)) < 0) {
-        perror("ioctl(TUNSETIFF) failed");
-        close(fd);
-        return err;
-    }
-    return fd;
+void handle_sigint(int sig) {
+    (void)sig;
+    g_stop_requested = true;
 }
 
-int tap_alloc_ns(const char* dev, const char* netns = nullptr) {
-    int orig_netns = -1;
+class TapPort {
+public:
+    int tap_fd;
 
-    if (netns) {
-        orig_netns = open("/proc/self/ns/net", O_RDONLY);
-        std::string ns_path = std::string("/var/run/netns/") + netns;
-        int ns_fd = open(ns_path.c_str(), O_RDONLY);
+    // RX (RTL -> Linux TAP)
+    uint8_t raw_rx_buf[2048];
+    size_t rx_pos;
 
-        if (ns_fd < 0) {
-            perror(("Failed to open netns path: " + ns_path).c_str());
-            if (orig_netns >= 0) close(orig_netns);
+    // TX (Linux TAP -> RTL)
+    uint8_t raw_tx_buf[2048];
+    ssize_t tx_len;
+    size_t tx_pos;
+    bool sending;
+
+    TapPort() : tap_fd(-1), rx_pos(0), tx_len(0), tx_pos(0), sending(false) {}
+
+    // Initialize TAP interface in current network namespace context
+    int init(const char* dev_name) {
+        struct ifreq ifr;
+        if ((tap_fd = open("/dev/net/tun", O_RDWR)) < 0) {
+            std::cerr << "[TAP ERROR] Cannot open /dev/net/tun: " << strerror(errno) << std::endl;
             return -1;
         }
 
-        if (setns(ns_fd, CLONE_NEWNET) < 0) {
-            perror("setns failed");
-            close(ns_fd);
-            if (orig_netns >= 0) close(orig_netns);
+        memset(&ifr, 0, sizeof(ifr));
+        ifr.ifr_flags = IFF_TAP | IFF_NO_PI;
+        strncpy(ifr.ifr_name, dev_name, IFNAMSIZ);
+
+        if (ioctl(tap_fd, TUNSETIFF, (void*)&ifr) < 0) {
+            std::cerr << "[TAP ERROR] ioctl(TUNSETIFF) failed on " << dev_name << ": " << strerror(errno) << std::endl;
+            close(tap_fd);
+            tap_fd = -1;
             return -1;
         }
-        close(ns_fd);
+
+        // Set non-blocking mode
+        int flags = fcntl(tap_fd, F_GETFL, 0);
+        fcntl(tap_fd, F_SETFL, flags | O_NONBLOCK);
+
+        std::cout << "[TAP] Bound successfully to interface: " << dev_name << std::endl;
+        return 0;
     }
 
-    int fd = tap_alloc(dev);
+    // Initialize TAP interface within a target Linux Network Namespace (e.g., ns_b)
+    int init_in_ns(const char* dev_name, const char* ns_name) {
+        int old_ns_fd = open("/proc/self/ns/net", O_RDONLY);
+        std::string ns_path = std::string("/var/run/netns/") + ns_name;
+        int target_ns_fd = open(ns_path.c_str(), O_RDONLY);
 
-    if (orig_netns >= 0) {
-        setns(orig_netns, CLONE_NEWNET);
-        close(orig_netns);
+        if (target_ns_fd < 0) {
+            std::cerr << "[TAP ERROR] Target namespace file " << ns_path << " not found: " << strerror(errno) << std::endl;
+            if (old_ns_fd >= 0) close(old_ns_fd);
+            return -1;
+        }
+
+        // Temporarily switch process context to target network namespace
+        if (setns(target_ns_fd, CLONE_NEWNET) < 0) {
+            std::cerr << "[TAP ERROR] setns failed into namespace " << ns_name << ": " << strerror(errno) << std::endl;
+            close(target_ns_fd);
+            if (old_ns_fd >= 0) close(old_ns_fd);
+            return -1;
+        }
+        close(target_ns_fd);
+
+        // Open TAP descriptor inside the target namespace
+        int status = init(dev_name);
+
+        // Restore host process default network namespace context
+        if (old_ns_fd >= 0) {
+            setns(old_ns_fd, CLONE_NEWNET);
+            close(old_ns_fd);
+        }
+
+        return status;
     }
 
-    return fd;
-}
+    // Process packets coming from Hardware MAC RX out to Linux TAP
+    void process_hw_to_tap(uint64_t data, uint8_t keep, uint8_t valid, uint8_t last) {
+        if (!valid) return;
 
-uint32_t calculate_crc32(const std::vector<uint8_t>& data) {
-    uint32_t crc = 0xFFFFFFFF;
-    for (uint8_t byte : data) {
-        crc ^= byte;
         for (int i = 0; i < 8; i++) {
-            crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320 : 0);
-        }
-    }
-    return ~crc;
-}
-
-template <typename TxDataT, typename TxCtrlT, typename RxDataT, typename RxCtrlT, typename TickFunc>
-ssize_t process_tap_frame(
-    int src_fd, int dst_fd,
-    TxDataT& tx_data_pin, TxCtrlT& tx_ctrl_pin,
-    const RxDataT& rx_data_pin, const RxCtrlT& rx_ctrl_pin,
-    TickFunc& tick, const char* dir_label
-) {
-    uint8_t buffer[1518];
-    ssize_t nread = read(src_fd, buffer, sizeof(buffer));
-    if (nread <= 0) return nread;
-
-    std::vector<uint8_t> frame(buffer, buffer + nread);
-
-    // Append CRC-32 (FCS)
-    uint32_t fcs = calculate_crc32(frame);
-    frame.push_back((fcs >> 0)  & 0xFF);
-    frame.push_back((fcs >> 8)  & 0xFF);
-    frame.push_back((fcs >> 16) & 0xFF);
-    frame.push_back((fcs >> 24) & 0xFF);
-
-    // Assemble MAC Stream: Preamble (7B) + SFD (1B) + Frame + FCS
-    std::vector<uint8_t> mac_stream = {0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0xD5};
-    mac_stream.insert(mac_stream.end(), frame.begin(), frame.end());
-
-    // Pad stream to an exact multiple of 8 bytes to maintain pure DATA blocks
-    while (mac_stream.size() % 8 != 0) {
-        mac_stream.push_back(0x00);
-    }
-
-    std::cout << "[" << dir_label << "] Streaming " << nread << " bytes through RTL PCS Datapath...\n";
-
-    std::vector<uint8_t> reconstructed_bytes;
-    size_t byte_idx = 0;
-    size_t total_stream_bytes = mac_stream.size();
-    size_t max_cycles = (total_stream_bytes / 8) + 2; // +2 cycles for pipeline flush
-
-    for (size_t cycle = 0; cycle < max_cycles; ++cycle) {
-        uint64_t txd = 0;
-        uint8_t  txc = 0x00;
-
-        if (byte_idx < total_stream_bytes) {
-            for (int lane = 0; lane < 8; ++lane) {
-                txd |= (static_cast<uint64_t>(mac_stream[byte_idx++]) << (lane * 8));
-            }
-            txc = 0x00; // Pure Data Block
-        } else {
-            txd = 0x0707070707070707ULL; // Idle Block /I/
-            txc = 0xFF;                 // Control
-        }
-
-        tx_data_pin = txd;
-        tx_ctrl_pin = txc;
-        tick();
-
-        // Sample descrambled output bytes from receiving interface
-        for (int lane = 0; lane < 8; ++lane) {
-            uint8_t rxd_byte = (rx_data_pin >> (lane * 8)) & 0xFF;
-            uint8_t rxc_bit  = (rx_ctrl_pin >> lane) & 0x1;
-
-            if (rxc_bit == 0 && reconstructed_bytes.size() < total_stream_bytes) {
-                reconstructed_bytes.push_back(rxd_byte);
+            if (keep & (1 << i)) {
+                raw_rx_buf[rx_pos++] = static_cast<uint8_t>((data >> (i * 8)) & 0xFF);
             }
         }
+
+        if (last && rx_pos > 0) {
+            // Drop runt frames under standard 14-byte Ethernet header length to avoid TAP driver EIO errors
+            if (rx_pos >= 14) {
+                ssize_t bytes_written = write(tap_fd, raw_rx_buf, rx_pos);
+                if (bytes_written < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                    std::cerr << "[TAP ERROR] Write error on TAP fd " << tap_fd << ": " << strerror(errno) << std::endl;
+                }
+            }
+            rx_pos = 0;
+        }
     }
 
-    // Deliver exact frame (stripping 8B preamble/SFD & trailing FCS/padding)
-    if (reconstructed_bytes.size() >= (8 + nread)) {
-        ssize_t nw = write(dst_fd, reconstructed_bytes.data() + 8, nread);
-        (void)nw;
+    // Ingest packets from Linux TAP into Hardware MAC TX
+    void process_tap_to_hw(uint64_t &tx_data, uint8_t &tx_keep, uint8_t &tx_valid, uint8_t &tx_last, uint8_t tx_ready) {
+        if (!sending) {
+            tx_len = read(tap_fd, raw_tx_buf, sizeof(raw_tx_buf));
+            if (tx_len > 0) {
+                sending = true;
+                tx_pos = 0;
+            } else {
+                tx_valid = 0;
+                tx_data  = 0;
+                tx_keep  = 0;
+                tx_last  = 0;
+                return;
+            }
+        }
+
+        if (sending && tx_ready) {
+            uint64_t d = 0;
+            uint8_t k = 0;
+            size_t rem = tx_len - tx_pos;
+            size_t chunk = (rem >= 8) ? 8 : rem;
+
+            for (size_t b = 0; b < chunk; b++) {
+                d |= (static_cast<uint64_t>(raw_tx_buf[tx_pos + b]) << (b * 8));
+                k |= (1 << b);
+            }
+
+            tx_data  = d;
+            tx_keep  = k;
+            tx_valid = 1;
+
+            tx_pos += chunk;
+            if (tx_pos >= static_cast<size_t>(tx_len)) {
+                tx_last = 1;
+                sending = false;
+            } else {
+                tx_last = 0;
+            }
+        } else if (!tx_ready) {
+            tx_valid = 0;
+        }
     }
 
-    return nread;
-}
+    ~TapPort() {
+        if (tap_fd >= 0) close(tap_fd);
+    }
+};
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
-    Verilated::traceEverOn(true);
+    std::signal(SIGINT, handle_sigint);
 
-    auto top = std::make_unique<Vtop>();
-    auto tfp = std::make_unique<VerilatedVcdC>();
+    Vtop* top = new Vtop;
+    TapPort tap_a;
+    TapPort tap_b;
 
-    top->trace(tfp.get(), 99);
-    tfp->open("waveform.vcd");
-
-    vluint64_t main_time = 0;
-    auto tick = [&]() {
-        top->clk = 0; top->eval(); tfp->dump(main_time++);
-        top->clk = 1; top->eval(); tfp->dump(main_time++);
-    };
-
-    int tap0_fd = tap_alloc_ns("tap0", nullptr);
-    int tap1_fd = tap_alloc_ns("tap1", "ns_b");
-
-    if (tap0_fd < 0 || tap1_fd < 0) {
-        std::cerr << "❌ Error: Run setup script with sudo before executing emulator.\n";
-        return 1;
-    }
-
-    // Reset Sequence
-    top->rst_n = 0;
-    top->a_txd = 0x0707070707070707ULL;
-    top->a_txc = 0xFF;
-    top->b_txd = 0x0707070707070707ULL;
-    top->b_txc = 0xFF;
-    for (int i = 0; i < 10; ++i) tick();
-    top->rst_n = 1;
-
-    // FSM Warm-up cycles to establish lock on both channels
-    for (int i = 0; i < 70; ++i) tick();
-
-    std::cout << "====================================================================================\n";
-    std::cout << " 🚀 Dual-Channel Hardware-in-the-Loop Active: [tap0] <---> [top.sv] <---> [tap1]\n";
-    std::cout << " 📡 Execute: ping -c 2 -I tap0 10.0.0.2\n";
-    std::cout << "====================================================================================\n";
-
-    while (!Verilated::gotFinish()) {
-        // Host -> ns_b: Drives A inputs (a_txd, a_txc) and reads B outputs (b_rxd, b_rxc)
-        ssize_t h2n = process_tap_frame(tap0_fd, tap1_fd, top->a_txd, top->a_txc, top->b_rxd, top->b_rxc, tick, "Host -> ns_b");
-
-        // ns_b -> Host: Drives B inputs (b_txd, b_txc) and reads A outputs (a_rxd, a_rxc)
-        ssize_t n2h = process_tap_frame(tap1_fd, tap0_fd, top->b_txd, top->b_txc, top->a_rxd, top->a_rxc, tick, "ns_b -> Host");
-
-        if (h2n <= 0 && n2h <= 0) {
-            top->a_txd = 0x0707070707070707ULL;
-            top->a_txc = 0xFF;
-            top->b_txd = 0x0707070707070707ULL;
-            top->b_txc = 0xFF;
-            tick();
-            usleep(1000);
+    bool enable_scrambler = false;
+    for (int i = 1; i < argc; i++) {
+        if (std::strcmp(argv[i], "--enable-scrambler") == 0 || std::strcmp(argv[i], "-s") == 0) {
+            enable_scrambler = true;
         }
     }
 
-    tfp->close();
-    close(tap0_fd);
-    close(tap1_fd);
+    // Bind tap0 in default host namespace and tap1 inside ns_b namespace
+    if (tap_a.init("tap0") < 0 || tap_b.init_in_ns("tap1", "ns_b") < 0) {
+        std::cerr << "[EMULATOR FATAL] Failed to initialize TAP interfaces across namespaces." << std::endl;
+        return 1;
+    }
+
+    top->enable_scrambler = enable_scrambler ? 1 : 0;
+
+    std::cout << "========================================================\n"
+              << "[EMULATOR] Dual TAP Node A (tap0) <-> Node B (ns_b/tap1) Active\n"
+              << "[EMULATOR] Scrambler Status: " 
+              << (enable_scrambler ? "ENABLED (Polynomial G(x) = x^58 + x^39 + 1)" : "DISABLED (Bypassed)") << "\n"
+              << "[EMULATOR] Press Ctrl+C to stop simulation cleanly.\n"
+              << "========================================================" << std::endl;
+
+    // Reset Sequence
+    top->clk = 0; top->rst_n = 0; top->eval();
+    top->clk = 1; top->rst_n = 0; top->eval();
+    top->clk = 0; top->rst_n = 1; top->eval();
+
+    // Continuous Hardware Emulation Loop
+    while (!Verilated::gotFinish() && !g_stop_requested) {
+        top->clk = !top->clk;
+        top->enable_scrambler = enable_scrambler ? 1 : 0;
+        top->eval();
+
+        if (top->clk == 1) {
+            // Node A Processing (tap0 <-> Host A RTL MAC)
+            tap_a.process_tap_to_hw(top->a_tx_data, top->a_tx_keep, top->a_tx_valid, top->a_tx_last, top->a_tx_ready);
+            tap_a.process_hw_to_tap(top->a_rx_data, top->a_rx_keep, top->a_rx_valid, top->a_rx_last);
+
+            // Node B Processing (ns_b/tap1 <-> Host B RTL MAC)
+            tap_b.process_tap_to_hw(top->b_tx_data, top->b_tx_keep, top->b_tx_valid, top->b_tx_last, top->b_tx_ready);
+            tap_b.process_hw_to_tap(top->b_rx_data, top->b_rx_keep, top->b_rx_valid, top->b_rx_last);
+        }
+    }
+
+    std::cout << "\n[EMULATOR] Shutting down cleanly..." << std::endl;
+    top->final();
+    delete top;
     return 0;
 }
