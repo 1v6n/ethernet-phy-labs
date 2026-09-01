@@ -19,6 +19,7 @@
 
 #include "Vtop.h"
 #include "verilated.h"
+#include "verilated_vcd_c.h"
 
 // Signal handling flag for Ctrl+C
 volatile bool g_stop_requested = false;
@@ -176,9 +177,14 @@ public:
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
+    Verilated::traceEverOn(true);
     std::signal(SIGINT, handle_sigint);
 
     Vtop* top = new Vtop;
+    VerilatedVcdC* tfp = new VerilatedVcdC;
+    top->trace(tfp, 99);
+    tfp->open("waveform.vcd");
+
     TapPort tap_a;
     TapPort tap_b;
 
@@ -201,32 +207,44 @@ int main(int argc, char** argv) {
               << "[EMULATOR] Dual TAP Node A (tap0) <-> Node B (ns_b/tap1) Active\n"
               << "[EMULATOR] Scrambler Status: " 
               << (enable_scrambler ? "ENABLED (Polynomial G(x) = x^58 + x^39 + 1)" : "DISABLED (Bypassed)") << "\n"
+              << "[EMULATOR] Waveform VCD trace logging enabled (waveform.vcd)\n"
               << "[EMULATOR] Press Ctrl+C to stop simulation cleanly.\n"
               << "========================================================" << std::endl;
 
+    uint64_t main_time = 0;
+
     // Reset Sequence
     top->clk = 0; top->rst_n = 0; top->eval();
+    tfp->dump(main_time++);
     top->clk = 1; top->rst_n = 0; top->eval();
+    tfp->dump(main_time++);
     top->clk = 0; top->rst_n = 1; top->eval();
+    tfp->dump(main_time++);
 
     // Continuous Hardware Emulation Loop
     while (!Verilated::gotFinish() && !g_stop_requested) {
-        top->clk = !top->clk;
+        // Phase 1: Rising edge (clk = 1) -> evaluate RTL
+        top->clk = 1;
         top->enable_scrambler = enable_scrambler ? 1 : 0;
         top->eval();
 
-        if (top->clk == 1) {
-            // Node A Processing (tap0 <-> Host A RTL MAC)
-            tap_a.process_tap_to_hw(top->a_tx_data, top->a_tx_keep, top->a_tx_valid, top->a_tx_last, top->a_tx_ready);
-            tap_a.process_hw_to_tap(top->a_rx_data, top->a_rx_keep, top->a_rx_valid, top->a_rx_last);
+        tap_a.process_hw_to_tap(top->a_rx_data, top->a_rx_keep, top->a_rx_valid, top->a_rx_last);
+        tap_b.process_hw_to_tap(top->b_rx_data, top->b_rx_keep, top->b_rx_valid, top->b_rx_last);
 
-            // Node B Processing (ns_b/tap1 <-> Host B RTL MAC)
-            tap_b.process_tap_to_hw(top->b_tx_data, top->b_tx_keep, top->b_tx_valid, top->b_tx_last, top->b_tx_ready);
-            tap_b.process_hw_to_tap(top->b_rx_data, top->b_rx_keep, top->b_rx_valid, top->b_rx_last);
-        }
+        tap_a.process_tap_to_hw(top->a_tx_data, top->a_tx_keep, top->a_tx_valid, top->a_tx_last, top->a_tx_ready);
+        tap_b.process_tap_to_hw(top->b_tx_data, top->b_tx_keep, top->b_tx_valid, top->b_tx_last, top->b_tx_ready);
+
+        tfp->dump(main_time++);
+
+        // Phase 2: Falling edge (clk = 0)
+        top->clk = 0;
+        top->eval();
+        tfp->dump(main_time++);
     }
 
-    std::cout << "\n[EMULATOR] Shutting down cleanly..." << std::endl;
+    std::cout << "\n[EMULATOR] Shutting down cleanly and closing waveform trace..." << std::endl;
+    tfp->close();
+    delete tfp;
     top->final();
     delete top;
     return 0;
